@@ -1,0 +1,40 @@
+# Dépendances pour le Système de Diagnostic MTC
+# SMAILI Maya & MORSLI Manel - UMMTO 2024/2025
+
+# Framework web
+streamlit==1.31.0
+
+# Deep Learning & Computer Vision
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Traitement d'images
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+pillow>=10.0.0
+
+# Calcul scientifique
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Visualisation
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.18.0
+
+# Utilitaires
+pyyaml>=6.0
+tqdm>=4.65.0
+python-dateutil>=2.8.0
+
+# Optionnel pour performances
+psutil>=5.9.0
+py-cpuinfo>=9.0.0
+
+# Pour l'augmentation des données
+albumentations>=1.3.0
+
+# Pour les requêtes HTTP
+requests>=2.31.0
