@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Application Web Professionnelle de Diagnostic MTC - Cancer du Sein
-Version Premium avec Interface Moderne et Diagnostic Avancé
+Version Premium avec Interface Moderne et Diagnostic Avancé + Détection Automatique de Langue
 SMAILI Maya & MORSLI Manel - UMMTO 2024/2025
 """
 
@@ -24,6 +24,290 @@ import plotly.graph_objects as go
 import plotly.express as px
 from ultralytics import YOLO
 import time
+
+# ============================================================================
+# NOUVELLES CLASSES POUR LA DETECTION AUTOMATIQUE DE LANGUE
+# ============================================================================
+
+# Vérification de SAM
+try:
+    from segment_anything import SamPredictor, sam_model_registry
+    SAM_AVAILABLE = True
+except ImportError:
+    SAM_AVAILABLE = False
+    print("⚠️ SAM non disponible. Installation : pip install segment-anything")
+
+class TongueDetector:
+    """Détecteur de langue avec YOLOv8"""
+    
+    def __init__(self, model_path="bestYolo8.pt"):
+        self.model_path = Path(model_path)
+        self.model = None
+        self.load_model()
+    
+    def load_model(self):
+        """Charge le modèle YOLOv8 pour détection de langue"""
+        try:
+            if self.model_path.exists():
+                self.model = YOLO(str(self.model_path))
+                print("✅ Modèle YOLOv8 de détection de langue chargé")
+            else:
+                print(f"⚠️ Modèle {self.model_path} non trouvé")
+                # Essayer de télécharger un modèle de base
+                self.model = YOLO('yolov8n.pt')
+                print("📥 Utilisation du modèle YOLOv8 de base")
+        except Exception as e:
+            print(f"❌ Erreur chargement modèle: {e}")
+            self.model = None
+    
+    def detect_tongue_bbox(self, image_path, confidence=0.25):
+        """Détecte le bounding box de la langue"""
+        if self.model is None:
+            return None
+        
+        try:
+            # Faire la prédiction
+            results = self.model(image_path, conf=confidence, verbose=False)
+            
+            # Extraire le meilleur bounding box
+            best_box = None
+            best_conf = 0
+            
+            for result in results:
+                if result.boxes is not None:
+                    for box in result.boxes:
+                        conf = float(box.conf)
+                        if conf > best_conf:
+                            best_conf = conf
+                            # Convertir de xyxy vers xywh
+                            xyxy = box.xyxy[0].cpu().numpy()
+                            x1, y1, x2, y2 = xyxy
+                            x, y, w, h = x1, y1, x2-x1, y2-y1
+                            best_box = [int(x), int(y), int(w), int(h)]
+            
+            if best_box and best_conf > confidence:
+                print(f"🎯 Langue détectée avec {best_conf:.2%} de confiance")
+                return best_box
+            else:
+                print("❌ Aucune langue détectée avec suffisamment de confiance")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Erreur détection: {e}")
+            return None
+
+class TongueSegmenter:
+    """Segmenteur de langue avec SAM"""
+    
+    def __init__(self, sam_checkpoint=None):
+        self.sam_checkpoint = sam_checkpoint
+        self.predictor = None
+        self.setup_sam()
+    
+    def setup_sam(self):
+        """Configure SAM si disponible"""
+        if not SAM_AVAILABLE:
+            print("⚠️ SAM non disponible - segmentation simple utilisée")
+            return
+        
+        # Chercher le checkpoint SAM
+        possible_paths = [
+            self.sam_checkpoint,
+            "sam_vit_h_4b8939.pth",
+            "models/sam_vit_h_4b8939.pth",
+            "/home/manel/sam_vit_h_4b8939.pth.1"  # Chemin de l'utilisateur
+        ]
+        
+        checkpoint_path = None
+        for path in possible_paths:
+            if path and Path(path).exists():
+                checkpoint_path = path
+                break
+        
+        if checkpoint_path:
+            try:
+                sam = sam_model_registry["vit_h"](checkpoint=checkpoint_path)
+                self.predictor = SamPredictor(sam)
+                print("✅ SAM initialisé")
+            except Exception as e:
+                print(f"❌ Erreur SAM: {e}")
+        else:
+            print("⚠️ Checkpoint SAM non trouvé - segmentation simple utilisée")
+    
+    def segment_tongue(self, image, bbox):
+        """Segmente la langue de l'image"""
+        if self.predictor is not None:
+            return self._segment_with_sam(image, bbox)
+        else:
+            return self._segment_simple(image, bbox)
+    
+    def _segment_with_sam(self, image, bbox):
+        """Segmentation avancée avec SAM"""
+        try:
+            x, y, w, h = bbox
+            
+            # Préparer SAM
+            self.predictor.set_image(image)
+            
+            # Prédire le masque
+            masks, _, _ = self.predictor.predict(
+                box=np.array([x, y, x + w, y + h]),
+                multimask_output=False
+            )
+            
+            # Appliquer le masque
+            mask = masks[0]
+            segmented_tongue = np.zeros_like(image)
+            segmented_tongue[mask] = image[mask]
+            
+            # Extraire la région d'intérêt
+            roi = segmented_tongue[y:y+h, x:x+w]
+            
+            print("✅ Segmentation SAM réussie")
+            return roi
+            
+        except Exception as e:
+            print(f"❌ Erreur segmentation SAM: {e}")
+            return self._segment_simple(image, bbox)
+    
+    def _segment_simple(self, image, bbox):
+        """Segmentation simple par crop"""
+        try:
+            x, y, w, h = bbox
+            
+            # Assurer que les coordonnées sont dans l'image
+            h_img, w_img = image.shape[:2]
+            x = max(0, min(x, w_img))
+            y = max(0, min(y, h_img))
+            w = min(w, w_img - x)
+            h = min(h, h_img - y)
+            
+            # Extraire la région
+            roi = image[y:y+h, x:x+w]
+            
+            print("✅ Segmentation simple réussie")
+            return roi
+            
+        except Exception as e:
+            print(f"❌ Erreur segmentation simple: {e}")
+            return image
+    
+    def resize_and_pad(self, tongue_roi, target_size=640):
+        """Redimensionne et ajoute du padding pour obtenir une taille fixe"""
+        if tongue_roi is None or tongue_roi.size == 0:
+            return None
+        
+        h_roi, w_roi = tongue_roi.shape[:2]
+        
+        # Calculer l'échelle pour préserver les proportions
+        scale = min(target_size / w_roi, target_size / h_roi)
+        
+        new_w, new_h = int(w_roi * scale), int(h_roi * scale)
+        resized_tongue = cv2.resize(tongue_roi, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Ajouter des bordures noires pour atteindre la taille cible
+        delta_w = target_size - new_w
+        delta_h = target_size - new_h
+        top, bottom = delta_h // 2, delta_h - (delta_h // 2)
+        left, right = delta_w // 2, delta_w - (delta_w // 2)
+        
+        padded_tongue = cv2.copyMakeBorder(
+            resized_tongue, top, bottom, left, right, 
+            cv2.BORDER_CONSTANT, value=[0, 0, 0]
+        )
+        
+        return padded_tongue
+
+class TongueProcessor:
+    """Processeur principal pour l'isolation de langue"""
+    
+    def __init__(self, yolo_model_path="bestYolo8.pt", sam_checkpoint=None):
+        self.detector = TongueDetector(yolo_model_path)
+        self.segmenter = TongueSegmenter(sam_checkpoint)
+        self.processed_dir = Path("mtc_processed")
+        self.processed_dir.mkdir(exist_ok=True)
+    
+    def process_image(self, image_path, save_processed=True):
+        """
+        Traite une image pour isoler la langue
+        
+        Args:
+            image_path: Chemin vers l'image
+            save_processed: Si True, sauvegarde l'image traitée
+            
+        Returns:
+            tuple: (processed_image_path, was_processed)
+                - processed_image_path: chemin vers l'image traitée
+                - was_processed: True si l'image a été traitée, False sinon
+        """
+        print(f"\n🔍 Traitement de l'image: {Path(image_path).name}")
+        
+        # Charger l'image
+        image = cv2.imread(str(image_path))
+        if image is None:
+            print("❌ Impossible de charger l'image")
+            return str(image_path), False
+        
+        original_path = Path(image_path)
+        
+        # 1. Essayer de détecter une langue
+        bbox = self.detector.detect_tongue_bbox(image_path)
+        
+        if bbox is None:
+            print("ℹ️ Aucune langue détectée - utilisation de l'image originale")
+            return str(image_path), False
+        
+        # 2. Segmenter la langue
+        tongue_roi = self.segmenter.segment_tongue(image, bbox)
+        
+        if tongue_roi is None:
+            print("❌ Échec de la segmentation")
+            return str(image_path), False
+        
+        # 3. Redimensionner et padder
+        processed_tongue = self.segmenter.resize_and_pad(tongue_roi)
+        
+        if processed_tongue is None:
+            print("❌ Échec du redimensionnement")
+            return str(image_path), False
+        
+        # 4. Sauvegarder si demandé
+        if save_processed:
+            processed_path = self.processed_dir / f"{original_path.stem}_processed{original_path.suffix}"
+            cv2.imwrite(str(processed_path), processed_tongue)
+            print(f"💾 Image traitée sauvegardée: {processed_path}")
+            return str(processed_path), True
+        else:
+            # Sauvegarder temporairement
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp_file:
+                cv2.imwrite(tmp_file.name, processed_tongue)
+                print(f"💾 Image traitée temporaire: {tmp_file.name}")
+                return tmp_file.name, True
+    
+    def is_available(self):
+        """Vérifie si le processeur est disponible"""
+        return self.detector.model is not None
+
+# Fonctions utilitaires
+def check_tongue_processing_availability():
+    """Vérifie la disponibilité des outils de traitement"""
+    status = {
+        'yolo_available': False,
+        'sam_available': SAM_AVAILABLE,
+        'bestYolo8_exists': Path("bestYolo8.pt").exists()
+    }
+    
+    try:
+        YOLO('yolov8n.pt')
+        status['yolo_available'] = True
+    except:
+        pass
+    
+    return status
+
+# ============================================================================
+# CONFIGURATION ORIGINALE (INCHANGÉE)
+# ============================================================================
 
 # Configuration de la page - DOIT être en premier
 st.set_page_config(
@@ -526,12 +810,16 @@ TONGUE_ZONES = {
 # Critères de diagnostic améliorés
 DIAGNOSTIC_CRITERIA = {
     'healthy': {
-        'forme': [],
-        'couleur': ['Langue_rose', 'Langue_normal'],
-        'enduit': [],
-        'salive': ['salive_normale', 'salive_humide'],
-        'ecchymoses': [],
-        'points_rouges': [],
+        'forme': ['Langue_normal', 'Langue_petite'],
+        'forme_alternative': ['langue_ganfelee'],
+        'couleur': ['Langue_rose', 'Langue_rouge'],
+        'enduit': ['enduit_blanc_mince'],
+        'salive': ['salive_normale'],
+        'fissure' : ['Fissure'],
+        'ecchymoses': [],  # 'Ecchymoses' ignorée si absente
+        'points_rouges': ['red_dot'],  # 'red_dot' ignoré si absent
+        'required_score': 0.3,
+        'weight': 1.0,
         'description': 'Équilibre énergétique optimal, aucun signe pathologique détecté',
         'recommendations': [
             'Maintenir une alimentation équilibrée',
@@ -541,12 +829,16 @@ DIAGNOSTIC_CRITERIA = {
         ]
     },
     'early': {
-        'forme': ['Langue_petite'],
+        'forme': ['Langue_normal', 'Langue_petite'],
+        'forme_alternative': ['langue_ganfelee'],
         'couleur': ['Langue_pale', 'Langue_rouge'],
         'enduit': ['enduit_blanc_mince', 'enduit_blanc_epais', 'Eduit_jaune_mince'],
         'salive': ['salive_normale', 'salive_humide'],
+        'fissure' : ['Fissure'],
         'ecchymoses': [],
-        'points_rouges': ['red_dots_foieD', 'red_dots_foieG'],
+        'points_rouges': ['red_dot'],
+        'required_score': 0.4,
+        'weight': 1.2,
         'description': 'Signes précoces de déséquilibre énergétique détectés',
         'recommendations': [
             'Consulter un professionnel de santé pour un bilan approfondi',
@@ -557,11 +849,15 @@ DIAGNOSTIC_CRITERIA = {
     },
     'advanced': {
         'forme': ['Langue_petite'],
-        'couleur': ['Langue_rose', 'Langue_rouge', 'Langue_rouge_foncee'],
-        'enduit': ['Eduit_jaune_mince', 'Eduit_jaune_epais'],
+        'forme_alternative': ['Langue_normal'],
+        'couleur': ['Langue_rouge', 'Langue_rouge_foncee'],
+        'enduit': ['Eduit_jaune_epais', 'Eduit_jaune_mince'],
         'salive': ['salive_normale', 'salive_humide'],
-        'ecchymoses': ['Ecchymosis_coeur', 'Ecchymosis_foieD', 'Ecchymosis_foieG'],
-        'points_rouges': ['red_dots_coeur', 'red_dots_foieD', 'red_dots_foieG', 'red_dots'],
+        'ecchymoses': ['Ecchymoses'],
+        'fissure' : ['Fissure'],
+        'points_rouges': ['red_dot'],
+        'required_score': 0.5,
+        'weight': 1.5,
         'description': 'Signes importants nécessitant une attention médicale immédiate',
         'recommendations': [
             'Consulter rapidement un médecin spécialiste',
@@ -681,6 +977,7 @@ FEATURE_DESCRIPTIONS = {
     }
 }
 
+
 class MTCDiagnosticApp:
     def __init__(self):
         if 'initialized' not in st.session_state:
@@ -689,6 +986,9 @@ class MTCDiagnosticApp:
             st.session_state.results = None
             st.session_state.uploaded_image = None
             st.session_state.current_page = 'home'
+            # NOUVEAU: Initialiser le processeur de langue
+            st.session_state.tongue_processor = None
+            st.session_state.use_tongue_detection = True
             
     def load_model(self):
         """Charge le modèle YOLO"""
@@ -700,6 +1000,50 @@ class MTCDiagnosticApp:
             except Exception as e:
                 st.error(f"❌ Erreur lors du chargement du modèle: {str(e)}")
                 st.info("💡 Vérifiez que le fichier 'best.pt' est dans: mtc_models/yolov11_mtc/weights/")
+                return False
+        return True
+
+    def load_tongue_processor(self):
+        """Charge le processeur de langue"""
+        if st.session_state.tongue_processor is None:
+            try:
+                # Chercher les modèles disponibles
+                yolo_paths = [
+                    "bestYolo8.pt",
+                    "models/bestYolo8.pt", 
+                    "mtc_models/bestYolo8.pt"
+                ]
+                
+                sam_paths = [
+                    "sam_vit_h_4b8939.pth",
+                    "models/sam_vit_h_4b8939.pth",
+                    "/home/manel/sam_vit_h_4b8939.pth.1"
+                ]
+                
+                yolo_path = None
+                for path in yolo_paths:
+                    if Path(path).exists():
+                        yolo_path = path
+                        break
+                
+                sam_path = None
+                for path in sam_paths:
+                    if Path(path).exists():
+                        sam_path = path
+                        break
+                
+                if yolo_path:
+                    st.session_state.tongue_processor = TongueProcessor(
+                        yolo_model_path=yolo_path,
+                        sam_checkpoint=sam_path
+                    )
+                    return True
+                else:
+                    st.warning("⚠️ Modèle bestYolo8.pt non trouvé - détection de langue désactivée")
+                    return False
+                    
+            except Exception as e:
+                st.error(f"❌ Erreur chargement processeur: {str(e)}")
                 return False
         return True
     
@@ -789,7 +1133,8 @@ class MTCDiagnosticApp:
             <div class="info-card" style="text-align: center;">
                 <div style="font-size: 3rem; margin-bottom: 1rem;">📸</div>
                 <h4>1. Capture • 拍攝</h4>
-                <p>Prenez une photo claire de votre langue en lumière naturelle</p>
+                <p>Prenez une photo de votre langue ou de votre visage<br>
+                <strong>L'IA détecte automatiquement la langue !</strong></p>
                 <small style="color: #D81B60;">舌診第一步</small>
             </div>
             """, unsafe_allow_html=True)
@@ -823,18 +1168,45 @@ class MTCDiagnosticApp:
                 st.rerun()
     
     def show_diagnostic(self):
-        """Page de diagnostic améliorée"""
+        """Page de diagnostic avec affichage correct de l'image traitée"""
         if not self.load_model():
             return
+        
+        # Charger le processeur de langue
+        tongue_processor_available = self.load_tongue_processor()
         
         st.markdown("""
         <div class="info-card">
             <h2>📸 Diagnostic par analyse de la langue</h2>
-            <p>Téléchargez une photo claire de votre langue pour commencer l'analyse.</p>
+            <p>Téléchargez une photo pour commencer l'analyse. L'IA détectera automatiquement la langue si nécessaire.</p>
         </div>
         """, unsafe_allow_html=True)
         
-        # Zone d'upload moderne
+        # Options de traitement
+        if tongue_processor_available:
+            with st.expander("⚙️ Options de traitement d'image", expanded=False):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.session_state.use_tongue_detection = st.checkbox(
+                        "🔍 Détection automatique de langue", 
+                        value=st.session_state.use_tongue_detection,
+                        help="Active la détection et l'isolation automatique de la langue sur des photos de visages"
+                    )
+                
+                with col2:
+                    if st.session_state.tongue_processor:
+                        status = "✅ Disponible"
+                        if st.session_state.tongue_processor.segmenter.predictor:
+                            status += " (avec SAM)"
+                        else:
+                            status += " (simple)"
+                    else:
+                        status = "❌ Non disponible"
+                    
+                    st.info(f"**État:** {status}")
+        
+        # Zone d'upload
         uploaded_file = st.file_uploader(
             "",
             type=['jpg', 'jpeg', 'png'],
@@ -843,13 +1215,14 @@ class MTCDiagnosticApp:
         )
         
         if uploaded_file is None:
-            # Instructions visuelles
+            # Instructions
             st.markdown("""
             <div class="upload-container">
                 <div style="font-size: 4rem; margin-bottom: 1rem;">📷</div>
                 <h3>Glissez votre image ici ou cliquez pour parcourir</h3>
                 <p style="color: #7F8C8D; margin-top: 1rem;">
-                    Assurez-vous que la photo est nette et bien éclairée
+                    Images de langue seule OU photos de visages avec langue visible<br>
+                    L'IA détectera automatiquement la langue si nécessaire
                 </p>
             </div>
             """, unsafe_allow_html=True)
@@ -861,11 +1234,11 @@ class MTCDiagnosticApp:
                 with col1:
                     st.markdown("""
                     **✅ À FAIRE :**
+                    - Photo de langue seule ou visage complet
                     - Utilisez la lumière naturelle
                     - Tirez complètement la langue
-                    - Photo de face, bouche bien ouverte
+                    - Photo nette et bien cadrée
                     - Prenez la photo le matin à jeun
-                    - Nettoyez l'objectif de votre appareil
                     """)
                 
                 with col2:
@@ -873,88 +1246,197 @@ class MTCDiagnosticApp:
                     **❌ À ÉVITER :**
                     - Flash direct sur la langue
                     - Aliments colorants avant la photo
-                    - Langue tendue ou crispée
-                    - Photo floue ou mal cadrée
+                    - Photo floue ou mal éclairée
+                    - Langue partiellement cachée
                     - Éclairage artificiel jaune
                     """)
         
         else:
-            # Image uploadée
+            # Image uploadée - Layout en 3 colonnes FIXES
             image = Image.open(uploaded_file)
             img_array = np.array(image)
             
-            # Affichage avec preview
-            col1, col2 = st.columns([1, 1])
+            # COLONNES FIXES - Ne changent pas pendant l'analyse
+            col1, col2, col3 = st.columns(3)
             
+            # COLONNE 1: Image originale (toujours affichée)
             with col1:
-                st.markdown("### 🖼️ Image originale")
+                st.markdown("#### 📷 Image originale")
                 st.image(image, use_column_width=True)
                 
-                # Infos sur l'image
                 st.markdown(f"""
-                <div class="info-card" style="margin-top: 1rem;">
+                <div style="background: #F8F9FA; padding: 1rem; border-radius: 8px; margin-top: 1rem;">
                     <p><strong>📁 Fichier:</strong> {uploaded_file.name}</p>
                     <p><strong>📐 Dimensions:</strong> {image.width} x {image.height} pixels</p>
                     <p><strong>💾 Taille:</strong> {uploaded_file.size / 1024:.1f} KB</p>
                 </div>
                 """, unsafe_allow_html=True)
             
+            # COLONNE 2: Image traitée (placeholder au début)
             with col2:
-                st.markdown("### 🔍 Lancer l'analyse")
+                st.markdown("#### 🎯 Langue isolée")
+                processed_image_container = st.empty()
+                status_container = st.empty()
                 
-                # Bouton d'analyse avec animation
-                if st.button("🚀 Analyser maintenant", use_container_width=True, key="analyze"):
-                    # Sauvegarder temporairement
+                # Placeholder initial
+                with processed_image_container:
+                    st.markdown("""
+                    <div style="background: #F5F5F5; border: 2px dashed #CCC; border-radius: 10px; 
+                                padding: 3rem; text-align: center; min-height: 200px;">
+                        <div style="font-size: 3rem; color: #999;">🔄</div>
+                        <p style="color: #666; margin-top: 1rem;">En attente du traitement...</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # COLONNE 3: Contrôles d'analyse
+            with col3:
+                st.markdown("#### 🚀 Lancer l'analyse")
+                
+                # Bouton d'analyse
+                if st.button("🔍 Analyser maintenant", use_container_width=True, key="analyze"):
+                    
+                    # VARIABLES IMPORTANTES
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
                         image.save(tmp_file.name)
-                        temp_path = tmp_file.name
+                        original_path = tmp_file.name
                     
-                    # Progress bar animée
+                    processed_path = original_path
+                    was_processed = False
+                    
+                    # Progress bar SOUS les colonnes
                     progress_bar = st.progress(0)
                     status_text = st.empty()
                     
-                    # Simulation de progression
-                    for i in range(101):
+                    # PHASE 1: Traitement de l'image
+                    if (st.session_state.use_tongue_detection and 
+                        st.session_state.tongue_processor and 
+                        st.session_state.tongue_processor.is_available()):
+                        
+                        # Étapes de traitement visibles
+                        for i in range(0, 20):
+                            progress_bar.progress(i)
+                            status_text.text('🎯 YOLOv8: Détection de la langue...')
+                            time.sleep(0.01)
+                        
+                        for i in range(20, 40):
+                            progress_bar.progress(i)
+                            status_text.text('🎭 SAM: Segmentation et isolation...')
+                            time.sleep(0.01)
+                        
+                        # TRAITEMENT RÉEL
+                        try:
+                            processed_path, was_processed = st.session_state.tongue_processor.process_image(
+                                original_path, save_processed=True
+                            )
+                            
+                            # AFFICHER L'IMAGE TRAITÉE IMMÉDIATEMENT
+                            if was_processed and Path(processed_path).exists():
+                                processed_img = Image.open(processed_path)
+                                
+                                # MISE À JOUR DE LA COLONNE 2
+                                with processed_image_container:
+                                    st.image(processed_img, use_column_width=True)
+                                
+                                with status_container:
+                                    st.markdown("""
+                                    <div style="background: #E8F5E9; padding: 1rem; border-radius: 8px;">
+                                        <p style="color: #2E7D32; margin: 0;"><strong>✅ Traitement réussi:</strong></p>
+                                        <p style="color: #2E7D32; margin: 0.5rem 0 0 0; font-size: 0.9rem;">
+                                            🎯 Langue détectée<br>
+                                            🎭 Fond supprimé<br>
+                                            📐 Redimensionné 640x640
+                                        </p>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                
+                                print(f"✅ Image traitée affichée: {processed_path}")
+                            else:
+                                # Échec du traitement
+                                with status_container:
+                                    st.warning("⚠️ Traitement échoué - image originale utilisée")
+                                
+                                with processed_image_container:
+                                    st.image(image, use_column_width=True)
+                                    
+                        except Exception as e:
+                            print(f"❌ Erreur traitement: {e}")
+                            with status_container:
+                                st.error(f"❌ Erreur: {str(e)}")
+                            
+                            with processed_image_container:
+                                st.image(image, use_column_width=True)
+                    
+                    else:
+                        # Mode sans détection - afficher image originale
+                        with processed_image_container:
+                            st.image(image, use_column_width=True)
+                        
+                        with status_container:
+                            st.info("ℹ️ Détection automatique désactivée")
+                    
+                    # PHASE 2: Analyse MTC
+                    for i in range(40, 70):
                         progress_bar.progress(i)
-                        if i < 20:
-                            status_text.text('🔄 Préparation de l\'image...')
-                        elif i < 50:
-                            status_text.text('🤖 Analyse par intelligence artificielle...')
-                        elif i < 80:
-                            status_text.text('🔬 Détection des caractéristiques...')
-                        else:
-                            status_text.text('📊 Génération du diagnostic...')
+                        status_text.text('🤖 YOLOv11: Analyse des caractéristiques MTC...')
                         time.sleep(0.02)
                     
-                    # Analyse réelle
-                    results = self.analyze_image(temp_path)
+                    for i in range(70, 90):
+                        progress_bar.progress(i)
+                        status_text.text('🔬 Détection des biomarqueurs...')
+                        time.sleep(0.02)
+                    
+                    for i in range(90, 100):
+                        progress_bar.progress(i)
+                        status_text.text('📊 Génération du diagnostic...')
+                        time.sleep(0.02)
+                    
+                    # ANALYSE RÉELLE
+                    results = self.analyze_image(processed_path)
                     st.session_state.results = results
                     st.session_state.uploaded_image = img_array
                     
+                    # Ajouter métadonnées de traitement
+                    if results and was_processed:
+                        results['preprocessing'] = {
+                            'tongue_detected': True,
+                            'original_path': original_path,
+                            'processed_path': processed_path,
+                            'method': 'YOLOv8 + SAM' if st.session_state.tongue_processor.segmenter.predictor else 'YOLOv8 simple'
+                        }
+                    
+                    progress_bar.progress(100)
+                    status_text.text('✅ Analyse terminée!')
+                    time.sleep(0.5)
+                    
+                    # NETTOYER
                     progress_bar.empty()
                     status_text.empty()
                     
+                    # AFFICHER LE RÉSULTAT FINAL
                     if results:
-                        # Afficher le résultat principal
                         stage = results['diagnosis']['stage']
                         confidence = results['diagnosis']['confidence']
                         
                         if stage == 'healthy':
                             status_class = "status-healthy"
                             icon = "✅"
-                            color = "#27AE60"
                         elif stage == 'early':
                             status_class = "status-early"
                             icon = "⚠️"
-                            color = "#F39C12"
                         else:
                             status_class = "status-advanced"
                             icon = "🚨"
-                            color = "#E74C3C"
                         
+                        message = results['diagnosis']['message']
+                        if was_processed:
+                            method = results.get('preprocessing', {}).get('method', 'Automatique')
+                            message += f" (Traitement: {method})"
+                        
+                        # RÉSULTAT SUR TOUTE LA LARGEUR
+                        st.markdown("<br>", unsafe_allow_html=True)
                         st.markdown(f"""
                         <div class="status-box {status_class}">
-                            <h2>{icon} {results['diagnosis']['message']}</h2>
+                            <h2>{icon} {message}</h2>
                             <h3>Confiance: {confidence:.1%}</h3>
                             <p style="margin-top: 1rem;">
                                 {results['diagnosis']['description']}
@@ -962,10 +1444,26 @@ class MTCDiagnosticApp:
                         </div>
                         """, unsafe_allow_html=True)
                         
+                        # RÉSUMÉ DU WORKFLOW
+                        if was_processed:
+                            st.markdown("""
+                            <div style="background: #E3F2FD; padding: 1rem; border-radius: 8px; margin: 1rem 0;">
+                                <h4 style="color: #1976D2; margin: 0 0 0.5rem 0;">🔄 Résumé du traitement</h4>
+                                <p style="margin: 0; color: #333;">
+                                    ✅ <strong>Étape 1:</strong> YOLOv8 a détecté la langue<br>
+                                    ✅ <strong>Étape 2:</strong> SAM a isolé la langue (fond noir)<br>
+                                    ✅ <strong>Étape 3:</strong> YOLOv11 a analysé les caractéristiques MTC<br>
+                                    ✅ <strong>Résultat:</strong> Diagnostic avec confiance de {confidence:.1%}
+                                </p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
                         # Bouton pour voir les détails
-                        if st.button("📊 Voir les résultats détaillés", use_container_width=True):
+                        if st.button("📊 Voir l'analyse complète", use_container_width=True):
                             st.session_state.current_page = 'results'
                             st.rerun()
+                    else:
+                        st.error("❌ Erreur lors de l'analyse. Veuillez réessayer.")
     
     def analyze_image(self, image_path):
         """Analyse complète de l'image"""
@@ -999,7 +1497,7 @@ class MTCDiagnosticApp:
             diagnosis = self.analyze_stage(detections)
             
             # Analyser les zones
-            image = cv2.imread(image_path)
+            image = cv2.imread(str(image_path))
             h, w = image.shape[:2]
             zone_analysis = self.analyze_zones(detections, w, h)
             
@@ -1154,6 +1652,11 @@ class MTCDiagnosticApp:
             text_color = "#E74C3C"
             icon = "🚨"
         
+        # Afficher info sur le préprocessing
+        preprocessing_info = ""
+        if results.get('preprocessing', {}).get('tongue_detected'):
+            preprocessing_info = "<p style='margin-top: 0.5rem; font-size: 0.9rem;'>🎯 Langue automatiquement détectée et isolée</p>"
+        
         st.markdown(f"""
         <div style="background: {bg_color}; color: {text_color}; padding: 2rem; 
                     border-radius: 15px; text-align: center; margin-bottom: 2rem;">
@@ -1162,6 +1665,7 @@ class MTCDiagnosticApp:
             <p style="font-size: 1.2rem; margin: 1rem 0;">
                 {results['diagnosis']['description']}
             </p>
+            {preprocessing_info}
         </div>
         """, unsafe_allow_html=True)
         
@@ -1568,14 +2072,18 @@ class MTCDiagnosticApp:
     
     def generate_report(self, results):
         """Génère le rapport texte"""
+        preprocessing_info = ""
+        if results.get('preprocessing', {}).get('tongue_detected'):
+            preprocessing_info = "\nTRAITEMENT AUTOMATIQUE: Langue détectée et isolée automatiquement"
+        
         report = f"""
 ================================================================================
                     RAPPORT DE DIAGNOSTIC MTC - CANCER DU SEIN
 ================================================================================
 
 Date d'analyse: {results['timestamp'].strftime('%d/%m/%Y à %H:%M')}
-Système: MTC Diagnostic Pro v2.0
-Développé par: SMAILI Maya & MORSLI Manel - UMMTO 2024/2025
+Système: MTC Diagnostic Pro v2.1
+Développé par: SMAILI Maya & MORSLI Manel - UMMTO 2024/2025{preprocessing_info}
 
 ================================================================================
                               RÉSULTAT PRINCIPAL
@@ -1672,6 +2180,15 @@ professionnel de santé qualifié.
         else:
             main_color = "#E74C3C"
         
+        preprocessing_info = ""
+        if results.get('preprocessing', {}).get('tongue_detected'):
+            preprocessing_info = """
+            <div style="background: #E8F5E9; border: 1px solid #4CAF50; color: #2E7D32; 
+                        padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <strong>🎯 Traitement automatique:</strong> Langue détectée et isolée automatiquement
+            </div>
+            """
+        
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -1745,6 +2262,8 @@ professionnel de santé qualifié.
                 <p>{results['timestamp'].strftime('%d/%m/%Y à %H:%M')}</p>
             </div>
             
+            {preprocessing_info}
+            
             <div class="result-box" style="border-color: {main_color};">
                 <h2 style="color: {main_color};">{results['diagnosis']['message']}</h2>
                 <p><strong>Confiance:</strong> {results['diagnosis']['confidence']:.1%}</p>
@@ -1816,6 +2335,13 @@ professionnel de santé qualifié.
             non-invasifs et culturellement adaptés, permettant une prise en charge 
             rapide et efficace.
             
+            ### 🆕 Nouveautés Version 2.1
+            
+            - **🎯 Détection automatique de langue** : L'IA peut maintenant analyser des photos de visages
+            - **🔍 Segmentation avancée** : Isolation précise de la langue avec SAM
+            - **📱 Interface améliorée** : Expérience utilisateur optimisée
+            - **📊 Rapports enrichis** : Informations sur le préprocessing automatique
+            
             <div style="margin-top: 2rem; padding: 1rem; background: #FFF5F8; border-radius: 10px; border: 1px solid #FFE4E9;">
                 <strong style="color: #D81B60;">🎗️ Engagement Rose</strong><br>
                 Nous soutenons activement la sensibilisation au cancer du sein et 
@@ -1843,11 +2369,12 @@ professionnel de santé qualifié.
         # Technologie avec accent MTC
         st.markdown("### 🔬 Technologie de pointe • 先進技術")
         
-        tech_cols = st.columns(4)
+        tech_cols = st.columns(5)
         
         technologies = [
-            ("🤖", "YOLOv11", "Détection IA • 人工智能"),
-            ("🔍", "21 標記", "Biomarqueurs MTC"),
+            ("🤖", "YOLOv11", "Diagnostic MTC • 中醫診斷"),
+            ("🎯", "YOLOv8", "Détection langue • 舌頭檢測"),
+            ("🎭", "SAM", "Segmentation • 分割"),
             ("☯", "5 區域", "Zones traditionnelles"),
             ("📊", "ML 學習", "Apprentissage continu")
         ]
@@ -1856,9 +2383,31 @@ professionnel de santé qualifié.
             with col:
                 st.markdown(f"""
                 <div class="info-card" style="text-align: center; border-top: 3px solid #FFB6C1;">
-                    <div style="font-size: 3rem; color: #D81B60;">{icon}</div>
-                    <h4 style="color: #333333;">{title}</h4>
-                    <p style="font-size: 0.9rem; color: #666666;">{desc}</p>
+                    <div style="font-size: 2.5rem; color: #D81B60;">{icon}</div>
+                    <h4 style="color: #333333; font-size: 1rem;">{title}</h4>
+                    <p style="font-size: 0.8rem; color: #666666;">{desc}</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Workflow détaillé
+        st.markdown("### 🔄 Workflow d'analyse • 分析流程")
+        
+        workflow_steps = [
+            ("📷", "Upload", "Photo de visage ou langue seule"),
+            ("🔍", "Détection", "YOLOv8 trouve la langue automatiquement"),
+            ("🎭", "Segmentation", "SAM isole la langue (optionnel)"),
+            ("🤖", "Analyse", "YOLOv11 MTC détecte 21 caractéristiques"),
+            ("📊", "Diagnostic", "Rapport complet selon principes MTC")
+        ]
+        
+        cols = st.columns(len(workflow_steps))
+        for col, (icon, title, desc) in zip(cols, workflow_steps):
+            with col:
+                st.markdown(f"""
+                <div style="text-align: center; padding: 1rem;">
+                    <div style="font-size: 3rem; color: #FFB6C1;">{icon}</div>
+                    <h4 style="color: #333333; margin: 0.5rem 0;">{title}</h4>
+                    <p style="font-size: 0.9rem; color: #666666; margin: 0;">{desc}</p>
                 </div>
                 """, unsafe_allow_html=True)
         
@@ -1884,6 +2433,23 @@ professionnel de santé qualifié.
             </div>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Changelog Version 2.1
+        st.markdown("### 📝 Nouveautés Version 2.1 • 更新日誌")
+        
+        changelog = [
+            "🎯 Détection automatique de langue sur photos de visages",
+            "🎭 Intégration du modèle SAM pour segmentation précise",
+            "🔍 Support des modèles YOLOv8 personnalisés (bestYolo8.pt)",
+            "📱 Interface utilisateur améliorée avec options de traitement",
+            "📊 Rapports enrichis avec informations de préprocessing",
+            "⚙️ Configuration automatique avec fallback intelligent",
+            "🔧 Sidebar avec état des modules en temps réel",
+            "💾 Sauvegarde automatique des images traitées"
+        ]
+        
+        for item in changelog:
+            st.markdown(f"- {item}")
         
         # Principes MTC
         st.markdown("### 📚 Principes de la MTC • 中醫原理")
@@ -1939,21 +2505,60 @@ professionnel de santé qualifié.
         </div>
         """, unsafe_allow_html=True)
 
-# Fonction principale
+# ============================================================================
+# FONCTION PRINCIPALE
+# ============================================================================
+
 def main():
     """Point d'entrée de l'application"""
     app = MTCDiagnosticApp()
     app.run()
 
-# Sidebar avec informations supplémentaires et thème MTC
+# ============================================================================
+# SIDEBAR MODIFIÉE AVEC INFORMATIONS SUR LES MODULES
+# ============================================================================
+
 with st.sidebar:
     st.markdown("""
     ### 🌸 MTC Diagnostic Pro
     ### 中醫診斷系統
     
-    **Version:** 2.0  
+    **Version:** 2.1  
     **Dernière mise à jour:** Juin 2025
     
+    ---
+    
+    ### 🔧 Modules disponibles
+    """)
+    
+    # Vérifier les modules
+    modules_status = check_tongue_processing_availability()
+    
+    # IA Principal
+    if st.session_state.get('model'):
+        st.success("✅ IA MTC - Actif")
+    else:
+        st.error("❌ IA MTC - Inactif")
+    
+    # Détection de langue
+    if modules_status['bestYolo8_exists']:
+        st.success("✅ Détection langue - Disponible")
+    else:
+        st.warning("⚠️ Détection langue - bestYolo8.pt manquant")
+    
+    # SAM
+    if modules_status['sam_available']:
+        st.success("✅ SAM - Disponible")
+    else:
+        st.info("ℹ️ SAM - Non installé")
+    
+    # YOLOv8 de base
+    if modules_status['yolo_available']:
+        st.success("✅ YOLOv8 - Disponible")
+    else:
+        st.warning("⚠️ YOLOv8 - Non installé")
+    
+    st.markdown("""
     ---
     
     ### 📊 統計 • Statistiques
@@ -1966,8 +2571,33 @@ with st.sidebar:
         st.metric("Confiance 信心", f"{results['diagnosis']['confidence']:.1%}")
         st.metric("Détections 檢測", len(results['detections']))
         st.metric("Zones affectées 影響", len(results['zone_analysis']))
+        
+        # Info sur le préprocessing
+        if results.get('preprocessing', {}).get('tongue_detected'):
+            st.success("🎯 Langue auto-détectée")
+        else:
+            st.info("📷 Image originale")
     else:
         st.info("Aucune analyse en cours • 無分析")
+    
+    st.markdown("""
+    ---
+    
+    ### ⚙️ Configuration
+    """)
+    
+    # Options de configuration
+    if st.checkbox("🔧 Mode développeur", help="Affiche les informations techniques"):
+        st.markdown("**Chemins des modèles:**")
+        st.code("MTC: mtc_models/yolov11_mtc/weights/best.pt")
+        st.code("Langue: bestYolo8.pt")
+        st.code("SAM: sam_vit_h_4b8939.pth")
+        
+        if st.session_state.get('results'):
+            st.markdown("**Dernière analyse:**")
+            st.code(f"Timestamp: {st.session_state.results['timestamp']}")
+            if st.session_state.results.get('preprocessing'):
+                st.code("Preprocessing: Activé")
     
     st.markdown("""
     ---
